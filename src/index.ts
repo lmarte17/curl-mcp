@@ -1,152 +1,189 @@
-// Import necessary modules from the MCP SDK
+// src/index.ts
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-// Import zod for schema validation and type safety
 import { z } from "zod";
+import fetch, { Response, RequestInit } from "node-fetch";
 
-// Define constants for your API integrations
-const API_BASE_URL = "https://api.example.com"; // Replace with your API base URL
-const USER_AGENT = "mcp-server/1.0"; // User-Agent header value for API requests
+// Types for requests and responses
+type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
 
-// Create an MCP server instance with a name and version
-// This is the main entry point for our MCP implementation
+interface CurlRequest {
+  url: string;
+  method: HttpMethod;
+  headers?: Record<string, string>;
+  body?: any;
+  timeout: number;
+}
+
+interface CurlResponse {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  data: string;
+}
+
+// Create an MCP server
 const server = new McpServer({
-  name: "my-mcp-server", // Server identifier in the MCP ecosystem - replace with your server name
-  version: "1.0.0" // Semantic versioning for our server
+  name: "curl-api",
+  version: "1.0.0",
 });
 
-/**
- * Helper function to make API requests
- *
- * @param url - The full URL endpoint to request data from
- * @returns A Promise that resolves to the parsed JSON response, or null if the request fails
- * @template T - Type parameter for the expected response data structure
- */
-async function makeApiRequest<T>(url: string, options = {}): Promise<T | null> {
-  // Create default headers for the API request
-  const defaultHeaders = {
-    "User-Agent": USER_AGENT,
-    "Content-Type": "application/json"
-  };
-
-  const requestOptions = {
-    headers: { ...defaultHeaders, ...(options as any).headers },
-    ...(options || {})
-  };
-
-  try {
-    // Make the HTTP request with fetch API
-    const response = await fetch(url, requestOptions);
-
-    // Check if the response was successful (status code 200-299)
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    // Parse the JSON response and cast it to the expected type
-    return (await response.json()) as T;
-  } catch (error) {
-    // Log any errors that occur during the request
-    console.error("Error making API request:", error);
-    return null; // Return null to indicate a failed request
-  }
-}
-
-/**
- * Interface for generic API responses
- * Replace or extend this with your specific API response structures
- */
-interface ApiResponse {
-  // Define the structure of your API responses here
-  success: boolean;
-  data?: any;
-  message?: string;
-}
-
-/**
- * Utility function to format API data into a human-readable string
- * Customize this function based on your specific data format
- */
-function formatResponse(data: any): string {
-  // Implement custom formatting logic here
-  if (typeof data === 'object') {
-    return JSON.stringify(data, null, 2);
-  }
-  return String(data);
-}
-
-// -----------------------------------------------------------------------------
-// REGISTER YOUR MCP TOOLS BELOW
-// -----------------------------------------------------------------------------
-
-// EXAMPLE TOOL TEMPLATE:
-// server.tool(
-//   "tool_name", // Tool name - used by clients to call this tool
-//   "Tool description", // Tool description - helps clients understand the purpose
-//   {
-//     // Define the input schema using zod for validation
-//     param1: z.string().describe("Description of param1"),
-//     param2: z.number().describe("Description of param2")
-//   },
-//   // Tool implementation function - what happens when this tool is called
-//   async ({ param1, param2 }) => {
-//     // Implement your tool logic here
-//     // ...
-//
-//     // Return the result in the format expected by the MCP protocol
-//     return {
-//       content: [
-//         {
-//           type: "text", // Content type (text, image, etc.)
-//           text: "Your response text here" // The actual response text
-//         }
-//       ]
-//     };
-//   }
-// );
-
-// Example tool implementation
+// Define the curl tool that fetches data from a URL
 server.tool(
-  "example_tool", 
-  "Example tool that demonstrates the basic structure", 
+  "curl",
+  "Makes an HTTP request to a URL and returns the response",
   {
-    input: z.string().describe("Input data to process")
+    url: z.string().url().describe("The URL to make a request to"),
+    method: z
+      .enum(["GET", "POST", "PUT", "DELETE", "PATCH"])
+      .default("GET")
+      .describe("HTTP method to use"),
+    headers: z
+      .record(z.string())
+      .optional()
+      .describe("HTTP headers to include with the request"),
+    body: z.any().optional().describe("Request body (for POST, PUT, PATCH requests)"),
+    timeout: z
+      .number()
+      .min(1000)
+      .max(30000)
+      .default(10000)
+      .describe("Request timeout in milliseconds"),
   },
-  async ({ input }) => {
-    // Process the input
-    const processedInput = `Processed: ${input}`;
-    
-    // Return the result
-    return {
-      content: [
-        {
-          type: "text",
-          text: processedInput
-        }
-      ]
-    };
+  async ({ url, method, headers, body, timeout }: CurlRequest) => {
+    try {
+      console.error(`Making ${method} request to ${url}`);
+
+      const options: RequestInit = {
+        method,
+        headers: headers || {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        timeout,
+      };
+
+      // Add body for non-GET requests if provided
+      if (method !== "GET" && body !== undefined) {
+        options.body = typeof body === "string" ? body : JSON.stringify(body);
+      }
+
+      const response: Response = await fetch(url, options);
+
+      // Try to parse as JSON first
+      let responseText: string;
+      let responseData: any;
+
+      try {
+        responseData = await response.json();
+        responseText = JSON.stringify(responseData, null, 2);
+      } catch (e) {
+        // If not JSON, get as text
+        responseText = await response.text();
+      }
+
+      // Include status and headers in response
+      const result: CurlResponse = {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        data: responseText,
+      };
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error("Error making request:", errorMessage);
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `Error making request: ${errorMessage}`,
+          },
+        ],
+      };
+    }
   }
 );
 
-/**
- * Main function to initialize and connect the MCP server
- */
-async function main() {
-  // Create a stdio transport for communication
-  // This allows the server to communicate with clients via standard input/output
-  const transport = new StdioServerTransport();
+// Add a JSON parsing tool to help with processing API responses
+server.tool(
+  "parse-json",
+  "Parses a JSON string and returns a formatted representation",
+  {
+    json: z.string().describe("The JSON string to parse"),
+    path: z.string().optional().describe("Optional JSONPath-like expression to extract specific data"),
+  },
+  async ({ json, path }: { json: string; path?: string }) => {
+    try {
+      const data = JSON.parse(json);
 
-  // Connect the server to the transport
-  // This starts listening for incoming messages and enables communication
-  await server.connect(transport);
+      // Extract data using path if provided
+      let result: any = data;
+      if (path) {
+        try {
+          // Very simple path implementation - split by dots and traverse
+          const parts = path.split(".");
+          for (const part of parts) {
+            if (result === null || result === undefined) break;
+            result = result[part];
+          }
+        } catch (e) {
+          const errorMessage = e instanceof Error ? e.message : String(e);
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Error extracting data with path "${path}": ${errorMessage}`,
+              },
+            ],
+          };
+        }
+      }
 
-  // Log a message to indicate the server is running
-  // Note: Using console.error instead of console.log because stdout is used for MCP communication
-  console.error("MCP Server running on stdio");
+      return {
+        content: [
+          {
+            type: "text",
+            text: typeof result === "object" ? JSON.stringify(result, null, 2) : String(result),
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `Error parsing JSON: ${errorMessage}`,
+          },
+        ],
+      };
+    }
+  }
+);
+
+// Start server
+async function main(): Promise<void> {
+  try {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("Curl API MCP Server running");
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("Error starting server:", errorMessage);
+    process.exit(1);
+  }
 }
 
-// Call the main function and handle any fatal errors
-main().catch((error) => {
-  console.error("Fatal error in main():", error);
-  process.exit(1); // Exit with error code 1 if there's a fatal error
-});
+main();
